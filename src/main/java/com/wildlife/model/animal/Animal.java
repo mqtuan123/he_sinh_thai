@@ -4,197 +4,334 @@ import com.wildlife.app.Config;
 import com.wildlife.model.base.Entity;
 import com.wildlife.model.base.Movable;
 import com.wildlife.model.enums.AnimalState;
+import com.wildlife.model.enums.Season;
+import com.wildlife.model.environment.WorldMap;
+import com.wildlife.model.environment.Zone;
+import com.wildlife.model.environment.Forest;
+import com.wildlife.model.environment.Lake;
+import com.wildlife.model.obstacle.Obstacle;
+import com.wildlife.strategy.AggressiveStrategy;
+import com.wildlife.strategy.HunterStrategy;
 import com.wildlife.strategy.SurvivalStrategy;
+import javafx.scene.canvas.GraphicsContext;
+import javafx.scene.paint.Color;
+import javafx.scene.text.Font;
 
 /**
- * Lớp trừu tượng cho tất cả các loại động vật.
+ * Lớp trừu tượng cho mọi động vật.
+ *
+ * ┌─ Fix ────────────────────────────────────────────────────────────────────┐
+ * │ • createOffspring() abstract — không còn reflection                       │
+ * │ • clampPosition() đúng với size/2                                         │
+ * │ • Aggressive threshold dùng Config constants                               │
+ * │ • findNearestLake() helper — xoá trùng lặp ở mọi Strategy                │
+ * │ • beEaten guard → thirst seek ngưỡng từ Config                            │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ * ┌─ Thêm ───────────────────────────────────────────────────────────────────┐
+ * │ • renderStatusBars() — 3 thanh HP/Hunger/Thirst                           │
+ * │ • getDeathAlpha() — hiệu ứng xác mờ dần 2 giây                           │
+ * │ • getInfo() — chuỗi popup khi click                                       │
+ * │ • renderStateLabel() — nhãn trạng thái nhỏ khi FLEEING/HUNTING            │
+ * └──────────────────────────────────────────────────────────────────────────┘
  */
 public abstract class Animal extends Entity implements Movable {
-    protected double health = Config.MAX_HEALTH;
-    protected double hunger = 0; // 0 là no, 100 là chết đói
-    protected double thirst = 0; // 0 là không khát, 100 là chết khát
-    protected double energy = 100;
-    
+
+    protected double health;
+    protected double maxHealth;
+    protected double hunger = 0;
+    protected double thirst = 0;
+
     protected double baseSpeed;
     protected double speed;
     protected double visionRange = Config.VISION_RANGE_DEFAULT;
-    
-    protected AnimalState state = AnimalState.IDLE;
+
+    protected AnimalState      state           = AnimalState.IDLE;
     protected SurvivalStrategy strategy;
-    
-    // Target cho di chuyển
+    protected SurvivalStrategy defaultStrategy;
+
+    private boolean isAggressive = false;
+
+    private int     deathTimer = 0;
+
     protected double targetX;
     protected double targetY;
-    
-    // Đối tượng đang bị nhắm tới (để ăn hoặc chạy trốn)
     protected Entity targetEntity;
 
-    public Animal(double x, double y, double size, double speed) {
+    public Animal(double x, double y, double size, double speed, double maxHealth) {
         super(x, y, size);
         this.baseSpeed = speed;
-        this.speed = speed;
-        this.targetX = x;
-        this.targetY = y;
-    }
-    
-    public void setStrategy(SurvivalStrategy strategy) {
-        this.strategy = strategy;
+        this.speed     = speed;
+        this.targetX   = x;
+        this.targetY   = y;
+        this.maxHealth = maxHealth;
+        this.health    = maxHealth;
     }
 
-    @Override
-    public void update() {
-        if (!isAlive) return;
+    /** Override trong subclass thủy sinh (Duck) để không bị giảm tốc trong Lake */
+    protected boolean isAquatic() { return false; }
 
-        // Giảm chỉ số sinh tồn theo thời gian
-        hunger += Config.HUNGER_RATE;
-        thirst += Config.THIRST_RATE;
-        
-        if (hunger >= Config.MAX_HUNGER || thirst >= Config.MAX_THIRST || health <= 0) {
-            die();
-            return;
-        }
-        
-        // Nếu có chiến thuật, thực thi nó (Bản đồ sẽ được truyền vào từ GameLoop, ở đây tạm thời gọi qua map nếu cần, nhưng chuẩn nhất là GameLoop gọi map update -> map gọi entity update. Ta sẽ sửa hàm update có tham số WorldMap, hoặc tách riêng logic behavior)
+    // ── Abstract ──────────────────────────────────────────────────────────────
+
+    protected abstract Animal createOffspring(double x, double y);
+
+    // ── Strategy ──────────────────────────────────────────────────────────────
+
+    public void setStrategy(SurvivalStrategy s) {
+        this.strategy        = s;
+        this.defaultStrategy = s;
     }
-    
-    // Chỉnh sửa lại hàm update để nhận WorldMap
-    public void updateSurvival(com.wildlife.model.environment.WorldMap map) {
-        if (!isAlive) return;
-        
-        // Cập nhật tốc độ theo trạng thái (tăng tốc khi săn mồi hoặc chạy trốn)
-        if (state == AnimalState.HUNTING || state == AnimalState.FLEEING) {
-            speed = baseSpeed * 1.5;
-        } else {
-            speed = baseSpeed;
-        }
-        
-        // Cập nhật chỉ số
-        hunger += Config.HUNGER_RATE;
-        thirst += Config.THIRST_RATE;
-        if (hunger >= Config.MAX_HUNGER || thirst >= Config.MAX_THIRST || health <= 0) {
-            die();
+
+    @Override public void update() {}
+
+    // ── Core Update ───────────────────────────────────────────────────────────
+
+    public void updateSurvival(WorldMap map) {
+        if (!isAlive) {
+            if (deathTimer > 0) deathTimer--;
             return;
         }
 
-        if (strategy != null) {
-            strategy.executeBehavior(this, map);
-        }
-        
-        // Sinh sản vào mùa xuân
-        if (map.getCurrentSeason() == com.wildlife.model.enums.Season.SPRING) {
-            // Tỷ lệ sinh sản: No và Khát thấp, ngẫu nhiên 0.05% mỗi frame (rất nhỏ để tránh quá tải)
-            if (hunger < 30 && thirst < 30 && Math.random() < 0.0005) {
-                reproduce(map);
+        // Tốc độ theo trạng thái
+        speed = (state == AnimalState.HUNTING || state == AnimalState.FLEEING)
+                ? baseSpeed * 1.5 : baseSpeed;
+
+        // Tốc độ theo địa hình (lấy modifier thấp nhất trong các Zone đang đứng)
+        double terrainMod = 1.0;
+        for (Zone z : map.getZones()) {
+            if (z.contains(x, y)) {
+                double mod = z.getSpeedModifier();
+                // Sinh vật thủy sinh không bị giảm tốc trong nước
+                if (z instanceof Lake && isAquatic()) mod = 1.0;
+                terrainMod = Math.min(terrainMod, mod);
             }
         }
-        
-        // Luôn di chuyển nếu đang không rảnh rỗi hoặc ngủ
-        if (state != AnimalState.IDLE && state != AnimalState.SLEEPING && state != AnimalState.EATING && state != AnimalState.DRINKING) {
+        speed *= terrainMod;
+
+        // Đói / Khát
+        hunger += Config.HUNGER_RATE;
+        double tr = Config.THIRST_RATE;
+        if (map.getCurrentSeason() == Season.SUMMER) tr *= Config.SUMMER_THIRST_MULTIPLIER;
+        thirst += tr;
+
+        // Mùa đông: mất HP khi không trong Forest
+        if (map.getCurrentSeason() == Season.WINTER) {
+            boolean sheltered = false;
+            for (Zone z : map.getZones()) {
+                if (z instanceof Forest && z.contains(x, y)) { sheltered = true; break; }
+            }
+            if (!sheltered) health -= Config.WINTER_OUTDOOR_DAMAGE;
+        }
+
+        // Chết
+        if (hunger >= Config.MAX_HUNGER || thirst >= Config.MAX_THIRST || health <= 0) {
+            die();
+            return;
+        }
+
+        // Aggressive toggle
+        if (!(defaultStrategy instanceof HunterStrategy)) {
+            if (!isAggressive && hunger > Config.AGGRESSIVE_HUNGER_ON) {
+                strategy     = new AggressiveStrategy();
+                isAggressive = true;
+            } else if (isAggressive && hunger < Config.AGGRESSIVE_HUNGER_OFF) {
+                strategy     = defaultStrategy;
+                isAggressive = false;
+            }
+        }
+
+        if (strategy != null) strategy.executeBehavior(this, map);
+
+        // Sinh sản
+        if (map.getCurrentSeason() == Season.SPRING
+                && hunger < 30 && thirst < 30
+                && Math.random() < Config.REPRODUCE_CHANCE
+                && map.getEntities().size() < Config.MAX_ENTITIES) {
+            reproduce(map);
+        }
+
+        // Di chuyển (trừ trạng thái đứng yên)
+        if (state != AnimalState.IDLE     &&
+            state != AnimalState.SLEEPING &&
+            state != AnimalState.EATING   &&
+            state != AnimalState.DRINKING) {
             move(map);
         }
+        // Reset YIELDING sau 1 frame (ngắn, chỉ để hiện label)
+        if (state == AnimalState.YIELDING) state = AnimalState.IDLE;
     }
 
-    @Override
-    public void move(com.wildlife.model.environment.WorldMap map) {
-        double dx = targetX - x;
-        double dy = targetY - y;
-        double distance = Math.sqrt(dx * dx + dy * dy);
-        
-        double moveX = 0;
-        double moveY = 0;
+    // ── Movement ──────────────────────────────────────────────────────────────
 
-        if (distance > speed) {
-            moveX = (dx / distance) * speed;
-            moveY = (dy / distance) * speed;
-        } else {
-            x = targetX;
-            y = targetY;
-            if (state == AnimalState.WANDERING) {
-                state = AnimalState.IDLE;
-            }
+    @Override
+    public void move(WorldMap map) {
+        double dx   = targetX - x;
+        double dy   = targetY - y;
+        double dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist <= speed) {
+            x = targetX; y = targetY;
+            if (state == AnimalState.WANDERING) state = AnimalState.IDLE;
+            clampPosition(map);
             return;
         }
 
-        // Boids/Steering behavior: Né vật cản (Obstacle Avoidance)
-        double repulsionX = 0;
-        double repulsionY = 0;
-        
+        double nx = dx / dist; // normalized direction
+        double ny = dy / dist;
+
+        // Repulsion: vật cản & động vật lớn hơn
+        double rx = 0, ry = 0;
         for (Entity e : map.getEntities()) {
-            if (e != this && (e instanceof com.wildlife.model.obstacle.Obstacle || 
-                             (e instanceof Animal && e.getSize() > this.getSize()))) {
-                double dist = this.distanceTo(e);
-                double safeDistance = this.getSize() / 2 + e.getSize() / 2 + 10; // Khoảng cách an toàn
-                
-                if (dist < safeDistance && dist > 0) {
-                    // Tạo lực đẩy ngược lại với vật cản
-                    double force = (safeDistance - dist) / safeDistance;
-                    repulsionX += ((this.x - e.getX()) / dist) * force * speed * 2;
-                    repulsionY += ((this.y - e.getY()) / dist) * force * speed * 2;
+            if (e == this || !e.isAlive()) continue;
+            boolean isObs  = e instanceof Obstacle;
+            boolean isBigger = (e instanceof Animal) && e.getSize() > this.size;
+            if (!isObs && !isBigger) continue;
+
+            double d    = distanceTo(e);
+            double safe = this.size / 2 + e.getSize() / 2 + 10;
+            if (d < safe && d > 0.01) {
+                double force = (safe - d) / safe;
+                double mult  = (e instanceof Elephant) ? 4.0 : 2.0;
+                rx += ((x - e.getX()) / d) * force * speed * mult;
+                ry += ((y - e.getY()) / d) * force * speed * mult;
+                // Hiển thị trạng thái nhường đường nếu bị đẩy bởi animal lớn hơn
+                if (isBigger && state != AnimalState.FLEEING && state != AnimalState.HUNTING) {
+                    state = AnimalState.YIELDING;
                 }
             }
         }
-        
-        // Áp dụng di chuyển + lực đẩy
-        x += moveX + repulsionX;
-        y += moveY + repulsionY;
-        
-        // Giới hạn trong bản đồ
-        x = Math.max(0, Math.min(x, map.getWidth()));
-        y = Math.max(0, Math.min(y, map.getHeight()));
+
+        x += nx * speed + rx;
+        y += ny * speed + ry;
+        clampPosition(map);
+    }
+
+    private void clampPosition(WorldMap map) {
+        x = Math.max(size / 2, Math.min(x, map.getWidth()  - size / 2));
+        y = Math.max(size / 2, Math.min(y, map.getHeight() - size / 2));
     }
 
     @Override
-    public void setTarget(double targetX, double targetY) {
-        this.targetX = targetX;
-        this.targetY = targetY;
-    }
+    public void setTarget(double tx, double ty) { this.targetX = tx; this.targetY = ty; }
+
+    // ── Survival Actions ──────────────────────────────────────────────────────
 
     public void eat(double nutrition) {
-        hunger -= nutrition;
-        if (hunger < 0) hunger = 0;
-        state = AnimalState.EATING;
+        hunger = Math.max(0, hunger - nutrition);
+        state  = AnimalState.EATING;
     }
 
-    public void drink(double waterAmount) {
-        thirst -= waterAmount;
-        if (thirst < 0) thirst = 0;
-        state = AnimalState.DRINKING;
+    public void drink(double amount) {
+        thirst = Math.max(0, thirst - amount);
+        state  = AnimalState.DRINKING;
     }
-    
-    public void takeDamage(double damage) {
-        health -= damage;
-        if (health <= 0) {
-            die();
-        }
+
+    public void takeDamage(double dmg) {
+        health -= dmg;
+        if (health <= 0) die();
     }
 
     protected void die() {
-        this.isAlive = false;
-        this.state = AnimalState.DEAD;
+        isAlive    = false;
+        state      = AnimalState.DEAD;
+        deathTimer = Config.DEATH_LINGER_FRAMES;
     }
-    
-    // Sinh sản con non
-    protected void reproduce(com.wildlife.model.environment.WorldMap map) {
-        try {
-            // Khởi tạo một đối tượng mới cùng class
-            Animal baby = this.getClass().getDeclaredConstructor(double.class, double.class)
-                              .newInstance(x + 20, y + 20);
-            map.addEntity(baby);
-            this.hunger += 20; // Đẻ xong sẽ đói hơn
-        } catch (Exception e) {
-            // Bỏ qua nếu có lỗi reflection
+
+    public boolean isReadyToRemove() { return !isAlive && deathTimer <= 0; }
+
+    protected void reproduce(WorldMap map) {
+        double ox = Math.max(size, Math.min(x + 20, map.getWidth()  - size));
+        double oy = Math.max(size, Math.min(y + 20, map.getHeight() - size));
+        map.addEntity(createOffspring(ox, oy));
+        hunger += 20;
+    }
+
+    // ── Helper: Lake gần nhất (dùng chung cho mọi Strategy) ─────────────────
+
+    public Zone findNearestLake(WorldMap map) {
+        Zone   best = null;
+        double minD = Double.MAX_VALUE;
+        for (Zone z : map.getZones()) {
+            if (!(z instanceof Lake)) continue;
+            double cx = z.getX() + z.getWidth()  / 2;
+            double cy = z.getY() + z.getHeight() / 2;
+            double dx = x - cx, dy2 = y - cy;
+            double d  = Math.sqrt(dx * dx + dy2 * dy2);
+            if (d < minD) { minD = d; best = z; }
+        }
+        return best;
+    }
+
+    // ── Render Helpers ────────────────────────────────────────────────────────
+
+    /** 3 thanh HP / Hunger / Thirst trên đầu con vật */
+    protected void renderStatusBars(GraphicsContext gc) {
+        if (!isAlive) return;
+        double bw = size * 1.4, bh = 3;
+        double bx = x - bw / 2;
+        double by = y - size / 2 - 14;
+
+        // Nền mờ
+        gc.setFill(Color.color(0, 0, 0, 0.28));
+        gc.fillRoundRect(bx - 1, by - 1, bw + 2, bh * 3 + 6, 3, 3);
+
+        // HP — đỏ
+        gc.setFill(Color.web("#444444")); gc.fillRect(bx, by, bw, bh);
+        gc.setFill(Color.web("#e74c3c")); gc.fillRect(bx, by, bw * clamp01(health / maxHealth), bh);
+
+        // Hunger — cam (cao = nguy hiểm)
+        gc.setFill(Color.web("#444444")); gc.fillRect(bx, by + bh + 1, bw, bh);
+        gc.setFill(Color.web("#e67e22")); gc.fillRect(bx, by + bh + 1, bw * clamp01(hunger / Config.MAX_HUNGER), bh);
+
+        // Thirst — xanh lam
+        gc.setFill(Color.web("#444444")); gc.fillRect(bx, by + bh * 2 + 2, bw, bh);
+        gc.setFill(Color.web("#2980b9")); gc.fillRect(bx, by + bh * 2 + 2, bw * clamp01(thirst / Config.MAX_THIRST), bh);
+    }
+
+    /** Nhãn nhỏ khi đang chạy trốn / săn mồi — giúp người xem hiểu ngay */
+    protected void renderStateLabel(GraphicsContext gc) {
+        if (!isAlive) return;
+        String label = null;
+        Color  col   = null;
+        switch (state) {
+            case FLEEING:  label = "!";   col = Color.YELLOW;         break;
+            case HUNTING:  label = "⚔";  col = Color.web("#e74c3c"); break;
+            case EATING:   label = "🍃"; col = Color.LIGHTGREEN;     break;
+            case DRINKING: label = "💧"; col = Color.LIGHTSKYBLUE;   break;
+            case YIELDING: label = "→";  col = Color.LIGHTGRAY;      break;
+            default: break;
+        }
+        if (label != null) {
+            gc.setFont(new Font("Arial", 10));
+            gc.setFill(col);
+            gc.fillText(label, x + size / 2 + 2, y - size / 2);
         }
     }
 
-    // Getters and Setters
-    public AnimalState getState() { return state; }
-    public void setState(AnimalState state) { this.state = state; }
-    
-    public double getHealth() { return health; }
-    public double getHunger() { return hunger; }
-    public double getThirst() { return thirst; }
-    public double getVisionRange() { return visionRange; }
-    public double getSpeed() { return speed; }
-    public Entity getTargetEntity() { return targetEntity; }
-    public void setTargetEntity(Entity entity) { this.targetEntity = entity; }
+    /** Độ mờ của xác (1.0 → 0.0 trong DEATH_LINGER_FRAMES frame) */
+    protected double getDeathAlpha() {
+        return deathTimer / (double) Config.DEATH_LINGER_FRAMES;
+    }
+
+    private double clamp01(double v) { return Math.max(0, Math.min(v, 1)); }
+
+    // ── Info cho popup click ──────────────────────────────────────────────────
+
+    public String getInfo() {
+        return String.format("%s | HP %.0f/%.0f | Đói %.0f%% | Khát %.0f%% | %s",
+            getClass().getSimpleName(),
+            health, maxHealth, hunger, thirst, state.name());
+    }
+
+    // ── Getters / Setters ─────────────────────────────────────────────────────
+
+    public AnimalState getState()         { return state; }
+    public void setState(AnimalState s)   { this.state = s; }
+    public double getHealth()             { return health; }
+    public double getHunger()             { return hunger; }
+    public double getThirst()             { return thirst; }
+    public double getVisionRange()        { return visionRange; }
+    public double getSpeed()              { return speed; }
+    public Entity getTargetEntity()       { return targetEntity; }
+    public void setTargetEntity(Entity e) { this.targetEntity = e; }
+    public double getMaxHealth()          { return maxHealth; }
 }

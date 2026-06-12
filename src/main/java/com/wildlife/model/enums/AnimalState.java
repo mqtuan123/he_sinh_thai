@@ -1,15 +1,26 @@
 package com.wildlife.model.enums;
 
 /**
- * Trạng thái hiện tại của một động vật
+ * Trạng thái hành vi của động vật — dùng trong Strategy và Render.
+ *
+ * IDLE      : Đứng yên / chờ đợi
+ * WANDERING : Lang thang tìm thức ăn
+ * HUNTING   : Đang săn mồi / lao vào thức ăn (kẻ ăn thịt)
+ * FLEEING   : Đang chạy trốn (con mồi)
+ * EATING    : Đang ăn
+ * DRINKING  : Đang uống nước
+ * SLEEPING  : Đang ngủ (nghỉ ngơi)
+ * YIELDING  : Đang dạt sang một bên nhường đường cho động vật lớn hơn
+ * DEAD      : Đã chết (đang trong giai đoạn xác mờ dần)
  */
 public enum AnimalState {
-    IDLE,       // Đứng yên
-    WANDERING,  // Đi lang thang ngẫu nhiên
-    HUNTING,    // Săn mồi (đuổi theo con mồi)
-    FLEEING,    // Bỏ chạy khỏi kẻ thù
-    EATING,     // Đang ăn
-    DRINKING,   // Đang uống
-    SLEEPING,   // Đang ngủ (hồi năng lượng)
-    DEAD        // Đã chết
+    IDLE,
+    WANDERING,
+    HUNTING,
+    FLEEING,
+    EATING,
+    DRINKING,
+    SLEEPING,
+    YIELDING,
+    DEAD
 }

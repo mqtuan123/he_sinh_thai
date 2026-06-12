@@ -18,4 +18,5 @@ module com.wildlife.eco_simulation {
     exports com.wildlife.engine;
     exports com.wildlife.sound;
     exports com.wildlife.observer;
+    exports com.wildlife.model.obstacle;
 }
