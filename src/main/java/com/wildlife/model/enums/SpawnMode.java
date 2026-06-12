@@ -1,17 +1,12 @@
 package com.wildlife.model.enums;
 
 /**
- * Chế độ "đặt entity" khi người dùng click lên bản đồ.
- * NONE = click không làm gì; các giá trị khác = spawn loại tương ứng.
+ * Chế độ "click để đặt thực thể" trên bản đồ (Click-to-Place).
+ * NONE nghĩa là click chuột không có tác dụng đặt thực thể.
  */
 public enum SpawnMode {
     NONE,
-    // Động vật
-    RABBIT, DEER, WOLF, TIGER, ELEPHANT,
-    // Thực vật
+    RABBIT, WOLF, DEER, TIGER, ELEPHANT,
     GRASS, TREE,
-    // Loài bổ sung
-    DUCK,
-    // Vật cản
     ROCK, BUSH
 }

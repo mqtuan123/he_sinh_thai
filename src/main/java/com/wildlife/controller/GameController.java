@@ -5,46 +5,44 @@ import com.wildlife.engine.GameLoop;
 import com.wildlife.factory.AnimalFactory;
 import com.wildlife.factory.ObstacleFactory;
 import com.wildlife.factory.PlantFactory;
-import com.wildlife.model.enums.SpawnMode;
+import com.wildlife.model.base.Entity;
 import com.wildlife.model.environment.WorldMap;
-import com.wildlife.sound.SoundManager;
 import com.wildlife.view.ControlPanel;
 import com.wildlife.view.GameView;
 import com.wildlife.view.HUDView;
 import javafx.animation.KeyFrame;
 import javafx.animation.Timeline;
 import javafx.scene.Scene;
-import javafx.scene.input.KeyCode;
 import javafx.scene.layout.BorderPane;
 import javafx.stage.Stage;
 import javafx.util.Duration;
 
 /**
- * Controller chính — MVC coordinator.
- * Thêm: keyboard shortcuts (Space, S, M, Esc).
- * Thêm: ambient sound on start.
- * Fix: ControlPanel constructor nhận WorldMap cho PopulationChart.
+ * Controller chính điều phối Model, View và Engine.
  */
 public class GameController {
-
-    private final Stage         stage;
-    private final WorldMap      worldMap;
-    private final GameView      gameView;
-    private final HUDView       hudView;
-    private final ControlPanel  controlPanel;
-
-    private final AnimalFactory   animalFactory   = new AnimalFactory();
-    private final PlantFactory    plantFactory    = new PlantFactory();
-    private final ObstacleFactory obstacleFactory = new ObstacleFactory();
-
-    private Timeline seasonTimer;
+    private Stage stage;
+    private WorldMap worldMap;
+    private GameView gameView;
+    private HUDView hudView;
+    private ControlPanel controlPanel;
+    
+    private AnimalFactory animalFactory;
+    private PlantFactory plantFactory;
+    private ObstacleFactory obstacleFactory;
 
     public GameController(Stage stage) {
-        this.stage       = stage;
-        this.worldMap    = new WorldMap(Config.MAP_WIDTH, Config.MAP_HEIGHT);
-        this.gameView    = new GameView();
-        this.hudView     = new HUDView(worldMap);
-        this.controlPanel = new ControlPanel(this, gameView, worldMap);
+        this.stage = stage;
+        this.worldMap = new WorldMap(Config.MAP_WIDTH, Config.MAP_HEIGHT);
+        this.gameView = new GameView();
+        this.hudView = new HUDView(worldMap);
+        this.controlPanel = new ControlPanel(this, gameView);
+        
+        this.animalFactory = new AnimalFactory();
+        this.plantFactory = new PlantFactory();
+        this.obstacleFactory = new ObstacleFactory();
+
+        this.gameView.setController(this);
     }
 
     public void start() {
@@ -54,141 +52,108 @@ public class GameController {
         root.setRight(controlPanel);
 
         Scene scene = new Scene(root, Config.WINDOW_WIDTH, Config.WINDOW_HEIGHT);
-        stage.setTitle("Wild-Life Eco Simulation  |  Space=Pause  S=Mùa  M=Âm thanh  Esc=Hủy chế độ");
+        stage.setTitle("Wild-Life Eco Simulation");
         stage.setScene(scene);
         stage.setResizable(false);
-
-        // ── Keyboard shortcuts ───────────────────────────────────────────────
-        scene.setOnKeyPressed(e -> {
-            if (e.getCode() == KeyCode.SPACE)  { togglePause();  return; }
-            if (e.getCode() == KeyCode.S)      { nextSeason();   return; }
-            if (e.getCode() == KeyCode.M)      { toggleSound();  return; }
-            if (e.getCode() == KeyCode.ESCAPE) {
-                gameView.setSpawnMode(SpawnMode.NONE);
-            }
-        });
-
         stage.show();
 
-        // Canvas click → spawn
-        gameView.setOnMapClick((x, y) -> spawnAtPosition(gameView.getSpawnMode(), x, y));
-
-        // Game loop
+        // Khởi tạo Game Loop
         GameLoop loop = GameLoop.getInstance();
         loop.initialize(worldMap, gameView);
         loop.start();
-
-        // FPS refresh 1Hz
-        Timeline fpsTimer = new Timeline(
-            new KeyFrame(Duration.seconds(1), e -> hudView.updateFPS(loop.getCurrentFPS()))
-        );
+        
+        // Timer riêng để update FPS trên HUD mỗi giây
+        Timeline fpsTimer = new Timeline(new KeyFrame(Duration.seconds(1), e -> {
+            hudView.updateFPS(loop.getCurrentFPS());
+        }));
         fpsTimer.setCycleCount(Timeline.INDEFINITE);
         fpsTimer.play();
-
-        // Tự động chuyển mùa mỗi 20 giây
-        seasonTimer = new Timeline(
-            new KeyFrame(Duration.seconds(20), e -> worldMap.nextSeason())
-        );
+        
+        // Timer tự động chuyển mùa mỗi 15 giây
+        Timeline seasonTimer = new Timeline(new KeyFrame(Duration.seconds(15), e -> {
+            worldMap.nextSeason();
+        }));
         seasonTimer.setCycleCount(Timeline.INDEFINITE);
         seasonTimer.play();
-
-        // Ambient sound
-        SoundManager.getInstance().playLooping(SoundManager.SoundEvent.AMBIENT);
-
-        // Seed khởi đầu
-        seedInitialEntities();
+        
+        // Spawn khởi tạo (10 cỏ, 5 thỏ, 1 sói, 3 hòn đá)
+        for (int i=0; i<3; i++) spawnObstacle("rock");
+        for (int i=0; i<10; i++) spawnPlant("grass");
+        for (int i=0; i<5; i++) spawnAnimal("rabbit");
+        spawnAnimal("wolf");
     }
 
-    // ── Spawn ──────────────────────────────────────────────────────────────────
+    public void spawnAnimal(String type) {
+        double x = Math.random() * Config.MAP_WIDTH;
+        double y = Math.random() * Config.MAP_HEIGHT;
+        Entity animal = animalFactory.createEntity(type, x, y);
+        worldMap.addEntity(animal);
+    }
+    
+    public void spawnPlant(String type) {
+        double x = Math.random() * Config.MAP_WIDTH;
+        double y = Math.random() * Config.MAP_HEIGHT;
+        Entity plant = plantFactory.createEntity(type, x, y);
+        worldMap.addEntity(plant);
+    }
+    
+    public void spawnObstacle(String type) {
+        double x = Math.random() * Config.MAP_WIDTH;
+        double y = Math.random() * Config.MAP_HEIGHT;
+        Entity obstacle = obstacleFactory.createEntity(type, x, y);
+        worldMap.addEntity(obstacle);
+    }
 
-    public void spawnAtPosition(SpawnMode mode, double x, double y) {
-        if (mode == null || mode == SpawnMode.NONE) return;
-        switch (mode) {
-            case RABBIT:   worldMap.addEntity(animalFactory.createEntity("rabbit",   x, y)); break;
-            case DEER:     worldMap.addEntity(animalFactory.createEntity("deer",     x, y)); break;
-            case WOLF:     worldMap.addEntity(animalFactory.createEntity("wolf",     x, y)); break;
-            case TIGER:    worldMap.addEntity(animalFactory.createEntity("tiger",    x, y)); break;
-            case ELEPHANT: worldMap.addEntity(animalFactory.createEntity("elephant", x, y)); break;
-            case DUCK:     worldMap.addEntity(animalFactory.createEntity("duck",     x, y)); break;
-            case GRASS:    worldMap.addEntity(plantFactory.createEntity("grass",     x, y)); break;
-            case TREE:     worldMap.addEntity(plantFactory.createEntity("tree",      x, y)); break;
-            case ROCK:     worldMap.addEntity(obstacleFactory.createEntity("rock",   x, y)); break;
-            case BUSH:     worldMap.addEntity(obstacleFactory.createEntity("bush",   x, y)); break;
-            default: break;
+    // ===== Click-to-Place: spawn tại tọa độ chỉ định =====
+
+    public void spawnAnimalAt(String type, double x, double y) {
+        Entity animal = animalFactory.createEntity(type, x, y);
+        worldMap.addEntity(animal);
+    }
+
+    public void spawnPlantAt(String type, double x, double y) {
+        Entity plant = plantFactory.createEntity(type, x, y);
+        worldMap.addEntity(plant);
+    }
+
+    public void spawnObstacleAt(String type, double x, double y) {
+        Entity obstacle = obstacleFactory.createEntity(type, x, y);
+        worldMap.addEntity(obstacle);
+    }
+    
+    public void togglePause() {
+        if (GameLoop.getInstance().isPaused()) {
+            GameLoop.getInstance().resume();
+        } else {
+            GameLoop.getInstance().pause();
         }
     }
-
-    public void spawnRandom(SpawnMode mode) {
-        spawnAtPosition(mode,
-            Math.random() * Config.MAP_WIDTH,
-            Math.random() * Config.MAP_HEIGHT);
+    
+    public void nextSeason() {
+        worldMap.nextSeason();
     }
-
-    // ── Map change ────────────────────────────────────────────────────────────
-
+    
     public void changeMap(String mapType) {
         worldMap.loadMapType(mapType);
-        switch (mapType) {
-            case "Grassland":
-                repeat(15, () -> spawnRandom(SpawnMode.GRASS));
-                repeat(6,  () -> spawnRandom(SpawnMode.RABBIT));
-                repeat(2,  () -> spawnRandom(SpawnMode.DEER));
-                repeat(1,  () -> spawnRandom(SpawnMode.WOLF));
-                repeat(4,  () -> spawnRandom(SpawnMode.DUCK));
-                break;
-            case "Forest":
-                repeat(10, () -> spawnRandom(SpawnMode.TREE));
-                repeat(6,  () -> spawnRandom(SpawnMode.BUSH));
-                repeat(5,  () -> spawnRandom(SpawnMode.ROCK));
-                repeat(5,  () -> spawnRandom(SpawnMode.RABBIT));
-                repeat(2,  () -> spawnRandom(SpawnMode.WOLF));
-                repeat(1,  () -> spawnRandom(SpawnMode.TIGER));
-                break;
-            case "Lake":
-                repeat(5,  () -> spawnRandom(SpawnMode.GRASS));
-                repeat(3,  () -> spawnRandom(SpawnMode.RABBIT));
-                repeat(1,  () -> spawnRandom(SpawnMode.WOLF));
-                repeat(4,  () -> spawnRandom(SpawnMode.DUCK));
-                break;
-            default:
-                seedInitialEntities();
-                break;
+        
+        // Spawn lại sinh vật sau khi đổi map để tránh map trống
+        if (mapType.equals("Grassland")) {
+            for (int i=0; i<15; i++) spawnPlant("grass");
+            for (int i=0; i<5; i++) spawnAnimal("rabbit");
+        } else if (mapType.equals("Forest")) {
+            for (int i=0; i<10; i++) spawnPlant("tree");
+            for (int i=0; i<3; i++) spawnAnimal("wolf");
+            for (int i=0; i<5; i++) spawnObstacle("rock");
+        } else if (mapType.equals("Lake")) {
+            for (int i=0; i<5; i++) spawnPlant("grass");
+            for (int i=0; i<2; i++) spawnAnimal("rabbit");
+            for (int i=0; i<1; i++) spawnAnimal("wolf");
+        } else {
+            // Combined
+            for (int i=0; i<3; i++) spawnObstacle("rock");
+            for (int i=0; i<10; i++) spawnPlant("grass");
+            for (int i=0; i<5; i++) spawnAnimal("rabbit");
+            spawnAnimal("wolf");
         }
     }
-
-    // ── Controls ──────────────────────────────────────────────────────────────
-
-    public void togglePause() {
-        GameLoop loop = GameLoop.getInstance();
-        if (loop.isPaused()) loop.resume(); else loop.pause();
-    }
-
-    public void nextSeason() { worldMap.nextSeason(); }
-
-    private void toggleSound() {
-        SoundManager sm = SoundManager.getInstance();
-        sm.setEnabled(!sm.isEnabled());
-        if (sm.isEnabled()) sm.playLooping(SoundManager.SoundEvent.AMBIENT);
-    }
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    private void seedInitialEntities() {
-        repeat(4,  () -> spawnRandom(SpawnMode.ROCK));
-        repeat(5,  () -> spawnRandom(SpawnMode.BUSH));
-        repeat(12, () -> spawnRandom(SpawnMode.GRASS));
-        repeat(4,  () -> spawnRandom(SpawnMode.TREE));
-        repeat(7,  () -> spawnRandom(SpawnMode.RABBIT));
-        repeat(3,  () -> spawnRandom(SpawnMode.DEER));
-        repeat(2,  () -> spawnRandom(SpawnMode.WOLF));
-        repeat(1,  () -> spawnRandom(SpawnMode.TIGER));
-        repeat(1,  () -> spawnRandom(SpawnMode.ELEPHANT));
-        repeat(3,  () -> spawnRandom(SpawnMode.DUCK));
-    }
-
-    private void repeat(int n, Runnable action) {
-        for (int i = 0; i < n; i++) action.run();
-    }
-
-    public WorldMap getWorldMap() { return worldMap; }
 }

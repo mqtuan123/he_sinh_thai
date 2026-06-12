@@ -1,71 +1,107 @@
 package com.wildlife.strategy;
 
-import com.wildlife.app.Config;
 import com.wildlife.model.animal.Animal;
 import com.wildlife.model.base.Entity;
 import com.wildlife.model.environment.WorldMap;
 import com.wildlife.model.environment.Zone;
-import com.wildlife.model.plant.Plant;
+import com.wildlife.model.environment.Lake;
 import com.wildlife.model.enums.AnimalState;
-import com.wildlife.sound.SoundManager;
 
 /**
- * AggressiveStrategy — kích hoạt khi đói > 80%.
- * Bất chấp kẻ thù, tầm nhìn tăng gấp đôi, ưu tiên ăn > uống.
- * Ngưỡng nhất quán với PassiveStrategy/ScaredStrategy (60%).
+ * Strategy Pattern: Chiến thuật "hung hãn" - khi cực kỳ đói (hunger > 80),
+ * động vật ăn cỏ trở nên liều lĩnh, lao thẳng tới nguồn nước/thức ăn
+ * gần nhất bất kể nguy hiểm, bỏ qua việc lẩn trốn.
+ *
+ * Tự kích hoạt khi hunger > 80, tự reset (trả lại strategy gốc) khi hunger < 40
+ * để tránh dao động (oscillation) liên tục giữa 2 strategy.
  */
 public class AggressiveStrategy implements SurvivalStrategy {
 
+    // Strategy "bình thường" để quay lại khi đã no
+    private SurvivalStrategy fallbackStrategy;
+
+    public AggressiveStrategy(SurvivalStrategy fallbackStrategy) {
+        this.fallbackStrategy = fallbackStrategy;
+    }
 
     @Override
     public void executeBehavior(Animal animal, WorldMap map) {
+        // Nếu đã hồi phục (hunger < 40) -> quay về strategy gốc
+        if (animal.getHunger() < 40) {
+            animal.setStrategy(fallbackStrategy);
+            if (fallbackStrategy != null) {
+                fallbackStrategy.executeBehavior(animal, map);
+            }
+            return;
+        }
 
-        // Uống nước nếu khát > 60% — nhất quán với các strategy khác
-        if (animal.getThirst() > Config.SURVIVAL_URGENT) {
-            Zone lake = animal.findNearestLake(map);
-            if (lake != null) {
-                if (lake.contains(animal.getX(), animal.getY())) {
+        // Ưu tiên nước nếu quá khát
+        if (animal.getThirst() > 70) {
+            Zone nearestLake = null;
+            double minLakeDist = Double.MAX_VALUE;
+
+            for (Zone z : map.getZones()) {
+                if (z instanceof Lake) {
+                    double lakeCenterX = z.getX() + z.getWidth() / 2;
+                    double lakeCenterY = z.getY() + z.getHeight() / 2;
+                    double dx = animal.getX() - lakeCenterX;
+                    double dy = animal.getY() - lakeCenterY;
+                    double dist = Math.sqrt(dx * dx + dy * dy);
+
+                    if (dist < minLakeDist) {
+                        minLakeDist = dist;
+                        nearestLake = z;
+                    }
+                }
+            }
+
+            if (nearestLake != null) {
+                if (nearestLake.contains(animal.getX(), animal.getY())) {
                     animal.drink(50);
-                    SoundManager.getInstance().playDrink();
-                    animal.setState(AnimalState.DRINKING);
+                    animal.setState(AnimalState.IDLE);
                 } else {
-                    animal.setTarget(lake.getX() + lake.getWidth()  / 2,
-                                     lake.getY() + lake.getHeight() / 2);
-                    animal.setState(AnimalState.WANDERING);
+                    animal.setState(AnimalState.HUNTING); // dùng tốc độ cao
+                    animal.setTarget(nearestLake.getX() + nearestLake.getWidth() / 2,
+                                     nearestLake.getY() + nearestLake.getHeight() / 2);
                 }
                 return;
             }
         }
 
-        // Tìm Plant gần nhất — tầm nhìn x2, bỏ qua mọi nguy hiểm
-        Entity bestFood   = null;
-        double minDist    = animal.getVisionRange() * 2;
+        // Liều lĩnh tìm bất kỳ thức ăn (Plant) gần nhất, không quan tâm ẩn nấp/nguy hiểm
+        Entity closestFood = null;
+        double minDistance = animal.getVisionRange() * 1.5; // tầm nhìn mở rộng vì quá đói
 
         for (Entity e : map.getEntities()) {
-            if (!(e instanceof Plant) || !e.isAlive()) continue;
-            Plant p = (Plant) e;
-            if (!p.canBeEaten()) continue;
-            double dist = animal.distanceTo(e);
-            if (dist < minDist) { minDist = dist; bestFood = e; }
+            if (e instanceof com.wildlife.model.plant.Plant && e.isAlive()) {
+                double dist = animal.distanceTo(e);
+                if (dist < minDistance) {
+                    minDistance = dist;
+                    closestFood = e;
+                }
+            }
         }
 
-        if (bestFood != null) {
+        if (closestFood != null) {
             animal.setState(AnimalState.HUNTING);
-            animal.setTarget(bestFood.getX(), bestFood.getY());
+            animal.setTarget(closestFood.getX(), closestFood.getY());
 
-            double eatRange = animal.getSize() / 2 + bestFood.getSize() / 2 + 5;
-            if (minDist < eatRange) {
-                double nutrition = ((Plant) bestFood).beEaten(20);
+            if (minDistance < animal.getSize() / 2 + closestFood.getSize() / 2 + 5) {
+                com.wildlife.model.plant.Plant food = (com.wildlife.model.plant.Plant) closestFood;
+                double nutrition = food.beEaten(30); // ăn liều, miếng to hơn bình thường
                 animal.eat(nutrition);
-                SoundManager.getInstance().playEat();
-                animal.setState(AnimalState.EATING);
+                animal.setState(AnimalState.IDLE);
             }
         } else {
-            // Không thấy thức ăn → quét rộng hơn
-            double rx = Math.max(0, Math.min(animal.getX() + (Math.random() * 300 - 150), map.getWidth()));
-            double ry = Math.max(0, Math.min(animal.getY() + (Math.random() * 300 - 150), map.getHeight()));
-            animal.setTarget(rx, ry);
-            animal.setState(AnimalState.WANDERING);
+            // Không có thức ăn -> đi lang thang liều lĩnh tìm kiếm
+            if (animal.getState() != AnimalState.WANDERING) {
+                double rx = animal.getX() + (Math.random() * 200 - 100);
+                double ry = animal.getY() + (Math.random() * 200 - 100);
+                rx = Math.max(0, Math.min(rx, map.getWidth()));
+                ry = Math.max(0, Math.min(ry, map.getHeight()));
+                animal.setTarget(rx, ry);
+                animal.setState(AnimalState.WANDERING);
+            }
         }
     }
 }
